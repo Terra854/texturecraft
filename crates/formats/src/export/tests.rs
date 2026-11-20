@@ -354,6 +354,24 @@ fn every_format_encodes_and_decodes() {
 }
 
 #[test]
+fn jpeg_texture_export_keeps_full_chroma() {
+    let mut channels = default_channels();
+    channels.push(Channel::Opacity);
+    let fx = Fx::new(&channels);
+    let mut opts = ExportOptions::new(builtin_preset("glTF PBR Metal Roughness").unwrap());
+    opts.format_override = Some(FileFormat::Jpeg);
+    let files = fx.render(&opts);
+    let base = find(&files, "_BaseColor.jpg");
+
+    // Find the baseline JPEG frame for the generated 64 × 64 RGB export.
+    let frame_header = [0xff, 0xc0, 0, 17, 8, 0, RES as u8, 0, RES as u8, 3];
+    let frame = base.bytes.windows(19).find(|segment| segment.starts_with(&frame_header)).expect("RGB JPEG frame");
+    assert_eq!([frame[11], frame[14], frame[17]], [0x11; 3], "JPEG component sampling factors");
+    assert_eq!(craft_image_codecs::jpeg_quality(&base.bytes), Some(95));
+    assert!(base.warnings.iter().any(|w| w.contains("alpha")));
+}
+
+#[test]
 fn list_outputs_matches_render_and_presets_round_trip() {
     let fx = Fx::new(&default_channels());
     for preset in builtin_presets() {
