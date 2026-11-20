@@ -142,6 +142,48 @@ fn exr_values_are_linear() {
 }
 
 #[test]
+fn exr_exports_luminance_and_alpha_at_both_depths() {
+    use exr::prelude::{FlatSamples, ReadChannels, ReadLayers};
+
+    let mut fx = Fx::new(&[Channel::Roughness]);
+    fx.set_all(Channel::Roughness, |_, _| [1.0; 3]);
+    let mut preset = builtin_preset("Separate maps").unwrap();
+    preset.maps = vec![MapSpec {
+        file: "luminance_alpha".into(),
+        format: FileFormat::Exr,
+        bit_depth: 16,
+        channels: vec![(Dest::L, SourceRef::Channel { channel: Channel::Roughness, component: 0 }), (Dest::A, SourceRef::Constant(0.75))],
+        inverted: Vec::new(),
+    }];
+    let mut opts = ExportOptions::new(preset);
+
+    for depth in [16, 32] {
+        opts.bit_depth_override = Some(depth);
+        let files = fx.render(&opts);
+        assert_eq!(files.len(), 1);
+        let image = exr::prelude::read()
+            .no_deep_data()
+            .largest_resolution_level()
+            .all_channels()
+            .first_valid_layer()
+            .all_attributes()
+            .from_buffered(Cursor::new(&files[0].bytes))
+            .unwrap();
+        let layer = image.layer_data;
+        assert_eq!((layer.size.0, layer.size.1), (RES as usize, RES as usize));
+        assert_eq!(layer.channel_data.list.len(), 2);
+
+        for (name, value) in [("Y", 1.0), ("A", 0.75)] {
+            let channel = layer.channel_data.list.iter().find(|channel| channel.name.eq(name)).unwrap_or_else(|| panic!("missing EXR channel {name}"));
+            let samples = &channel.sample_data;
+            assert!(matches!((depth, samples), (16, FlatSamples::F16(_)) | (32, FlatSamples::F32(_))), "{depth}-bit {name} sample type");
+            assert_eq!(samples.len(), (RES * RES) as usize);
+            assert!(samples.values_as_f32().all(|sample| sample == value), "{depth}-bit {name} samples");
+        }
+    }
+}
+
+#[test]
 fn directx_flips_green() {
     let mut fx = Fx::new(&default_channels());
     let n = Vec3::new(0.3, 0.4, 0.0);
@@ -335,7 +377,7 @@ fn every_format_encodes_and_decodes() {
             for f in &files {
                 assert!(f.name.ends_with(format.extension()));
                 if format == FileFormat::Exr && f.name.starts_with("la") {
-                    continue; // Y/A EXR: covered by `exr_values_are_linear`.
+                    continue; // Y/A EXR is checked with the EXR crate in `exr_exports_luminance_and_alpha_at_both_depths`.
                 }
 
                 assert_eq!(decode(f).dimensions(), (RES, RES), "{}", f.name);
