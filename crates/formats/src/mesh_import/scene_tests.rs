@@ -855,15 +855,16 @@ fn dae_empty_material_binding_stays_distinct_from_named_default() {
 fn dae_preserves_multiple_cameras_on_one_node() {
     let dae = DAE
         .replace(
-            r#"<camera id="cam" name="Overview"><optics><technique_common><perspective><yfov>30</yfov></perspective></technique_common></optics></camera>"#,
-            r#"<camera id="cam" name="Overview"><optics><technique_common><perspective><yfov>30</yfov></perspective></technique_common></optics></camera>
-    <camera id="cam2" name="Detail"><optics><technique_common><orthographic><ymag>2</ymag></orthographic></technique_common></optics></camera>"#,
+            r#"<camera id="lens"><optics><technique_common><perspective><yfov>30</yfov></perspective></technique_common></optics></camera>"#,
+            r#"<camera id="lens"><optics><technique_common><perspective><yfov>30</yfov></perspective></technique_common></optics></camera>
+    <camera id="lens2" name="Detail"><optics><technique_common><orthographic><ymag>2</ymag></orthographic></technique_common></optics></camera>"#,
         )
-        .replace(r##"<instance_camera url="#cam"/>"##, r##"<instance_camera url="#cam"/><instance_camera url="#cam2"/>"##);
+        .replace(r##"<instance_camera url="#lens"/>"##, r##"<instance_camera url="#lens"/><instance_camera url="#lens2"/>"##);
+    assert_ne!(dae, DAE);
     let r = import_mesh_bytes("scene.dae", dae.as_bytes()).unwrap();
-    let names: Vec<&str> = r.cameras.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, ["Overview", "Detail"]);
-    assert!(!r.cameras[0].ortho && r.cameras[1].ortho);
+    assert_eq!(r.cameras.len(), 2, "{:?}", r.cameras);
+    assert!(!r.cameras[0].ortho && (r.cameras[0].fov - 30.0).abs() < 1e-3);
+    assert!(r.cameras[1].ortho);
 }
 
 #[test]
