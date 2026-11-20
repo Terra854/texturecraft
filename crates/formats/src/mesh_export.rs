@@ -252,7 +252,11 @@ pub fn glb_bytes(mesh: &Mesh, name: &str, textures: &[GlbTextures]) -> Result<Ve
         })
         .collect();
     let scene = to_craft_scene(mesh, name, materials, images);
-    craft_mesh::gltf::write_glb(&scene, &craft_mesh::Limits::default()).map_err(|e| FormatError::Invalid(e.to_string()))
+    let options = craft_mesh::gltf::GlbWriteOptions {
+        mag_filter: Some(craft_mesh::gltf::MagFilter::Linear),
+        min_filter: Some(craft_mesh::gltf::MinFilter::LinearMipmapLinear),
+    };
+    craft_mesh::gltf::write_glb_with_options(&scene, &craft_mesh::Limits::default(), &options).map_err(|e| FormatError::Invalid(e.to_string()))
 }
 
 /// OBJ names end at whitespace.
@@ -354,6 +358,21 @@ mod tests {
     }
 
     #[test]
+    fn glb_texture_export_keeps_filtering() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::write_buffer_with_format(&mut png, &[127, 63, 31], 1, 1, image::ColorType::Rgb8, image::ImageFormat::Png).unwrap();
+        let textures = GlbTextures { base_color: Some(png.into_inner()), ..GlbTextures::default() };
+        let mesh = texturecraft_geom::primitives::cube(1.0);
+        let glb = glb_bytes(&mesh, "Textured cube", &[textures]).unwrap();
+
+        let document = gltf::Gltf::from_slice(&glb).unwrap();
+        let material = document.materials().next().unwrap();
+        let sampler = material.pbr_metallic_roughness().base_color_texture().unwrap().texture().sampler();
+        let expected = (Some(gltf::texture::MagFilter::Linear), Some(gltf::texture::MinFilter::LinearMipmapLinear));
+        assert_eq!((sampler.mag_filter(), sampler.min_filter()), expected);
+    }
+
+    #[test]
     fn glb_writes_clearcoat_and_sheen_extensions() {
         use serde_json::{Value, json};
         const KHR_CLEARCOAT: &str = "KHR_materials_clearcoat";
@@ -382,6 +401,9 @@ mod tests {
         let doc = json_of(GlbTextures::from_files(vec![file("Sheen.png", png(image::ColorType::Rgba8))]));
         assert_eq!(doc["extensionsUsed"], json!([KHR_SHEEN]));
         assert_eq!(doc["materials"][0]["extensions"][KHR_SHEEN]["sheenRoughnessTexture"], doc["materials"][0]["extensions"][KHR_SHEEN]["sheenColorTexture"]);
-        assert!(json_of(GlbTextures::default()).get("extensionsUsed").is_none());
+        let untextured = json_of(GlbTextures::default());
+        for key in ["extensionsUsed", "textures", "samplers"] {
+            assert!(untextured.get(key).is_none(), "unexpected {key} on an untextured export");
+        }
     }
 }
