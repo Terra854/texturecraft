@@ -46,18 +46,23 @@ fn decode_imported_png(bytes: &[u8], max_texels: u64, max_alloc: u64) -> Result<
         ChannelLayout::Rgba => (1, 2, Some(3)),
         _ => return Err(crate::malformed("image", "unexpected PNG channel layout")),
     };
-    let read_sample: fn(&[u8]) -> f32 = match png.sample_type() {
-        SampleType::U8 => |bytes| f32::from(bytes[0]) * (1.0 / f32::from(u8::MAX)),
-        SampleType::U16 => |bytes| f32::from(u16::from_ne_bytes([bytes[0], bytes[1]])) * (1.0 / f32::from(u16::MAX)),
+    let (read_sample, max): (fn(&[u8]) -> f32, f32) = match png.sample_type() {
+        SampleType::U8 => (|bytes| f32::from(bytes[0]), f32::from(u8::MAX)),
+        SampleType::U16 => (|bytes| f32::from(u16::from_ne_bytes([bytes[0], bytes[1]])), f32::from(u16::MAX)),
         _ => return Err(crate::malformed("image", "unexpected PNG sample type")),
     };
-    // Keep the old cast arithmetic so a cached Gray16 resource matches its reloaded pixels.
+    // Match the previous decoder's cast: gray expansion multiplies by the reciprocal,
+    // and direct RGB and RGBA casts divide. Gray16 cache/reload relies on the exact values.
+    let reciprocal = 1.0 / max;
     let sample_bytes = png.sample_type().bytes();
     let pixels = png.data().chunks_exact(layout.channels() * sample_bytes);
     let mut rgba = Vec::new();
     rgba.try_reserve_exact(pixels.len()).map_err(|error| FormatError::TooLarge(error.to_string()))?;
     rgba.extend(pixels.map(|pixel| {
-        let at = |channel: usize| read_sample(&pixel[channel * sample_bytes..]);
+        let at = |channel: usize| {
+            let sample = read_sample(&pixel[channel * sample_bytes..]);
+            if layout.is_gray() { sample * reciprocal } else { sample / max }
+        };
         [at(0), at(green), at(blue), alpha.map_or(1.0, at)]
     }));
     Ok(DecodedImage { width: png.width(), height: png.height(), rgba, srgb: true })
@@ -336,7 +341,7 @@ mod tests {
             let imported = decode_image_within(&png, 4).unwrap();
             assert_eq!((imported.width, imported.height), (2, 2));
             assert!(imported.srgb);
-            assert!(imported.rgba.iter().copied().eq(expected.pixels().map(|pixel| pixel.0)));
+            assert_eq!(imported.rgba, expected.into_raw().as_chunks::<4>().0);
         }
     }
 
