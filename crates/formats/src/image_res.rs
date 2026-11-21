@@ -31,6 +31,14 @@ pub fn decode_image_within(bytes: &[u8], max_texels: u64) -> Result<DecodedImage
 }
 
 fn decode_imported_png(bytes: &[u8], max_texels: u64, max_alloc: u64) -> Result<DecodedImage> {
+    if let Ok((width, height, _)) = craft_image_codecs::png_probe::header(bytes) {
+        if width == 0 || height == 0 || width > MAX_IMAGE_SIZE || height > MAX_IMAGE_SIZE {
+            return Err(FormatError::TooLarge(format!("image is {width}x{height} (limit {MAX_IMAGE_SIZE})")));
+        }
+        if u64::from(width) * u64::from(height) > max_texels {
+            return Err(FormatError::TooLarge(format!("image is {width}x{height}, more than {max_texels} texels")));
+        }
+    }
     let options = DecodeOptions { limits: Limits::new(MAX_IMAGE_SIZE, MAX_IMAGE_SIZE, max_texels, max_alloc), keep_orientation: true };
     let png = crate::guard("image", || {
         craft_image_codecs::decode_as_with(Format::Png, bytes, &options).map_err(|error| match error {
