@@ -1,6 +1,6 @@
 //! Decoding imported image resources (fills, alphas, stencils).
 
-use craft_image_codecs::{ChannelLayout, EncodeOptions, Format, Image, PngCompression, SampleType};
+use craft_image_codecs::{ChannelLayout, CodecError, DecodeOptions, EncodeOptions, Format, Image, Limits, PngCompression, SampleType};
 
 use crate::{FormatError, MAX_IMAGE_SIZE, MAX_RESOURCE_TEXELS, Result};
 
@@ -23,7 +23,44 @@ pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage> {
 /// [`decode_image`] for an image of at most `max_texels` (width × height), checked from the
 /// header, before any pixel is decoded or allocated.
 pub fn decode_image_within(bytes: &[u8], max_texels: u64) -> Result<DecodedImage> {
-    decode_image_with_limits(bytes, max_texels, image::Limits::default())
+    let limits = image::Limits::default();
+    if craft_image_codecs::detect(bytes) == Some(Format::Png) {
+        return decode_imported_png(bytes, max_texels, limits.max_alloc.unwrap_or(u64::MAX));
+    }
+    decode_image_with_limits(bytes, max_texels, limits)
+}
+
+fn decode_imported_png(bytes: &[u8], max_texels: u64, max_alloc: u64) -> Result<DecodedImage> {
+    let options = DecodeOptions { limits: Limits::new(MAX_IMAGE_SIZE, MAX_IMAGE_SIZE, max_texels, max_alloc), keep_orientation: true };
+    let png = crate::guard("image", || {
+        craft_image_codecs::decode_as_with(Format::Png, bytes, &options).map_err(|error| match error {
+            CodecError::LimitExceeded(message) => FormatError::TooLarge(message),
+            error => crate::malformed("image", error),
+        })
+    })?;
+    let layout = png.layout();
+    let (green, blue, alpha) = match layout {
+        ChannelLayout::Gray => (0, 0, None),
+        ChannelLayout::GrayA => (0, 0, Some(1)),
+        ChannelLayout::Rgb => (1, 2, None),
+        ChannelLayout::Rgba => (1, 2, Some(3)),
+        _ => return Err(crate::malformed("image", "unexpected PNG channel layout")),
+    };
+    let read_sample: fn(&[u8]) -> f32 = match png.sample_type() {
+        SampleType::U8 => |bytes| f32::from(bytes[0]) * (1.0 / f32::from(u8::MAX)),
+        SampleType::U16 => |bytes| f32::from(u16::from_ne_bytes([bytes[0], bytes[1]])) * (1.0 / f32::from(u16::MAX)),
+        _ => return Err(crate::malformed("image", "unexpected PNG sample type")),
+    };
+    // Keep the old cast arithmetic so a cached Gray16 resource matches its reloaded pixels.
+    let sample_bytes = png.sample_type().bytes();
+    let pixels = png.data().chunks_exact(layout.channels() * sample_bytes);
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(pixels.len()).map_err(|error| FormatError::TooLarge(error.to_string()))?;
+    rgba.extend(pixels.map(|pixel| {
+        let at = |channel: usize| read_sample(&pixel[channel * sample_bytes..]);
+        [at(0), at(green), at(blue), alpha.map_or(1.0, at)]
+    }));
+    Ok(DecodedImage { width: png.width(), height: png.height(), rgba, srgb: true })
 }
 
 /// Decode a cook output under both its declared dimensions and decoder allocation budget.
@@ -284,6 +321,33 @@ mod tests {
         assert_eq!(decode_image_within(&png, 64).unwrap().width, 8);
         assert!(matches!(decode_image_within(&png, 63), Err(FormatError::TooLarge(_))));
         assert!(decode_image(&png).is_ok());
+    }
+
+    #[test]
+    fn imported_png_keeps_color_under_alpha_and_gray16_precision() {
+        let rgba = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(2, 2, vec![61, 113, 173, 0, 37, 103, 237, 81, 34, 99, 5, 193, 89, 211, 239, 255]).unwrap(),
+        );
+        let gray_alpha = image::DynamicImage::ImageLumaA16(image::ImageBuffer::from_raw(2, 2, vec![1234, 0, 1, 27, 0xabcd, 60211, 0xffff, 0xffff]).unwrap());
+        for pixels in [rgba, gray_alpha] {
+            let mut png = Vec::new();
+            pixels.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+            let expected = pixels.into_rgba32f();
+            let imported = decode_image_within(&png, 4).unwrap();
+            assert_eq!((imported.width, imported.height), (2, 2));
+            assert!(imported.srgb);
+            assert!(imported.rgba.iter().copied().eq(expected.pixels().map(|pixel| pixel.0)));
+        }
+    }
+
+    #[test]
+    fn png_import_checks_texels_before_requiring_the_pixel_payload() {
+        let png = coverage_png(4, 3, &[255; 12], [13, 27, 83]).unwrap();
+        // PNG signature followed by a complete IHDR (length, type, 13-byte data and CRC).
+        let header = &png[..33];
+        assert!(matches!(decode_image_within(header, 11), Err(FormatError::TooLarge(_))));
+        assert!(matches!(decode_image_within(header, 12), Err(FormatError::Malformed { .. })));
+        assert!(decode_image_within(&png, 12).is_ok());
     }
 
     #[test]
